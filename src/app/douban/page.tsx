@@ -34,6 +34,9 @@ import VirtualGrid from '@/components/VirtualGrid';
 function DoubanPageClient() {
   const searchParams = useSearchParams();
 
+  // 🔧 统一分页常量 - 防止分页步长不一致导致重复数据
+  const PAGE_SIZE = 50;
+
   // 参数映射: 中文 -> 英文 (解决 API 400 错误)
   const CATEGORY_MAPPING: Record<string, string> = {
     热门: 'hot',
@@ -325,7 +328,7 @@ function DoubanPageClient() {
           kind: 'tv' as const,
           category: type,
           type: safeType,
-          pageLimit: 50,
+          pageLimit: PAGE_SIZE,
           pageStart,
         };
       }
@@ -335,7 +338,7 @@ function DoubanPageClient() {
         kind: type as 'tv' | 'movie',
         category: safeCategory,
         type: safeType,
-        pageLimit: 50,
+        pageLimit: PAGE_SIZE,
         pageStart,
       };
     },
@@ -396,7 +399,7 @@ function DoubanPageClient() {
           data = await getDoubanList({
             tag: selectedCategory.query,
             type: selectedCategory.type,
-            pageLimit: 50,
+            pageLimit: PAGE_SIZE,
             pageStart: 0,
           });
         } else {
@@ -433,7 +436,7 @@ function DoubanPageClient() {
       } else if (type === 'anime') {
         data = await getDoubanRecommends({
           kind: primarySelection === '番剧' ? 'tv' : 'movie',
-          pageLimit: 50,
+          pageLimit: PAGE_SIZE,
           pageStart: 0,
           category: '动画',
           format: primarySelection === '番剧' ? '电视剧' : '',
@@ -452,7 +455,7 @@ function DoubanPageClient() {
       } else if (primarySelection === '全部') {
         data = await getDoubanRecommends({
           kind: type === 'show' ? 'tv' : (type as 'tv' | 'movie'),
-          pageLimit: 50,
+          pageLimit: PAGE_SIZE,
           pageStart: 0, // 初始数据加载始终从第一页开始
           category: multiLevelValues.type
             ? (multiLevelValues.type as string)
@@ -481,7 +484,7 @@ function DoubanPageClient() {
 
         if (isSnapshotEqual(requestSnapshot, currentSnapshot)) {
           setDoubanData(data.list);
-          setHasMore(data.list.length >= 50); // 如果返回满页，可能还有更多
+          setHasMore(data.list.length >= PAGE_SIZE); // 如果返回满页，可能还有更多
           setCurrentPage(0); // 重置页码
           setLoading(false);
 
@@ -544,7 +547,7 @@ function DoubanPageClient() {
       setIsLoadingMore(true);
 
       let data: DoubanResult;
-      const pageStart = requestSnapshot.currentPage * 50;
+      const pageStart = requestSnapshot.currentPage * PAGE_SIZE;
 
       // 3. 使用映射后的参数获取数据
       if (type === 'custom') {
@@ -556,7 +559,7 @@ function DoubanPageClient() {
           data = await getDoubanList({
             tag: selectedCategory.query,
             type: selectedCategory.type,
-            pageLimit: 50,
+            pageLimit: PAGE_SIZE,
             pageStart,
           });
         } else {
@@ -568,7 +571,7 @@ function DoubanPageClient() {
       } else if (type === 'anime') {
         data = await getDoubanRecommends({
           kind: primarySelection === '番剧' ? 'tv' : 'movie',
-          pageLimit: 50,
+          pageLimit: PAGE_SIZE,
           pageStart,
           category: '动画',
           format: primarySelection === '番剧' ? '电视剧' : '',
@@ -581,7 +584,7 @@ function DoubanPageClient() {
       } else if (primarySelection === '全部') {
         data = await getDoubanRecommends({
           kind: type === 'show' ? 'tv' : (type as 'tv' | 'movie'),
-          pageLimit: 50,
+          pageLimit: PAGE_SIZE,
           pageStart,
           category: multiLevelValues.type || '',
           format: type === 'show' ? '综艺' : type === 'tv' ? '电视剧' : '',
@@ -606,7 +609,7 @@ function DoubanPageClient() {
           requestSnapshot.secondarySelection ===
             currentSnapshot.secondarySelection;
 
-        // 5. 直接追加数据，但去重（避免同一 ID 出现多次）
+        // 5. 双重锁定去重（避免同一 ID 出现多次）
         if (isMatch && data.list.length > 0) {
           console.log(
             '✅ [fetchMoreData] Appending',
@@ -615,21 +618,30 @@ function DoubanPageClient() {
             doubanData.length,
           );
 
-          // 🔧 去重逻辑: 过滤掉已存在的 ID
+          // 🔧 双重锁定去重: 检查 New vs Old + New vs New (API内部重复)
           setDoubanData((prev) => {
             const existingIds = new Set(prev.map((item) => item.id));
-            const newItems = data.list.filter(
-              (item) => !existingIds.has(item.id),
-            );
+            const uniqueNewItems: DoubanItem[] = [];
+
+            for (const item of data.list) {
+              // Check 1: 不在现有列表中
+              // Check 2: 不在本批次已添加的项中 (修复 API 返回内部重复)
+              if (!existingIds.has(item.id)) {
+                existingIds.add(item.id); // 立即添加到 Set，阻止后续重复
+                uniqueNewItems.push(item);
+              }
+            }
+
             console.log(
-              `   🔍 Filtered: ${data.list.length} -> ${newItems.length} (removed ${data.list.length - newItems.length} duplicates)`,
+              `   📊 Batch: ${data.list.length}, Added: ${uniqueNewItems.length}, Duplicates removed: ${data.list.length - uniqueNewItems.length}`,
             );
+
             // 如果没有新数据，返回原数组避免不必要的重渲染
-            if (newItems.length === 0) return prev;
-            return [...prev, ...newItems];
+            if (uniqueNewItems.length === 0) return prev;
+            return [...prev, ...uniqueNewItems];
           });
 
-          setHasMore(data.list.length >= 50);
+          setHasMore(data.list.length >= PAGE_SIZE);
           setCurrentPage((prev) => prev + 1);
         } else if (!isMatch) {
           console.log('⚠️ [fetchMoreData] Filter changed, discarding data');
