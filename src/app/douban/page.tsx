@@ -522,35 +522,28 @@ function DoubanPageClient() {
       return;
     }
 
-    // 1. 创建快照 - 不再依赖 currentPage，使用动态偏移
-    const requestSnapshot = {
+    // 1. 创建筛选条件快照 - 只包含筛选字段，不包含分页信息
+    const filterSnapshot = {
       type,
       primarySelection,
       secondarySelection,
       multiLevelSelection: multiLevelValues,
       selectedWeekday,
-      // 记录当前数据长度作为分页起点
-      dataLength: doubanData.length,
     };
 
     // 2. 关键修复: 立即更新 ref 防止竞态条件
-    currentParamsRef.current = {
-      type: requestSnapshot.type,
-      primarySelection: requestSnapshot.primarySelection,
-      secondarySelection: requestSnapshot.secondarySelection,
-      multiLevelSelection: requestSnapshot.multiLevelSelection,
-      selectedWeekday: requestSnapshot.selectedWeekday,
-    };
+    currentParamsRef.current = { ...filterSnapshot };
+
+    // 3. 计算分页偏移 - 直接使用 doubanData.length，与快照解耦
+    const pageStart = doubanData.length;
 
     try {
       setIsLoadingMore(true);
-
-      let data: DoubanResult;
-      // ✅ 动态偏移: 从当前数据长度开始，适应 API 返回任意数量
-      const pageStart = requestSnapshot.dataLength;
       console.log(`📍 [fetchMoreData] Requesting from offset: ${pageStart}`);
 
-      // 3. 使用映射后的参数获取数据
+      let data: DoubanResult;
+
+      // 4. 使用映射后的参数获取数据
       if (type === 'custom') {
         const selectedCategory = customCategories.find(
           (cat) =>
@@ -601,17 +594,19 @@ function DoubanPageClient() {
       }
 
       if (data.code === 200) {
-        // 4. 宽松验证: 只检查关键筛选条件
-        const currentSnapshot = { ...currentParamsRef.current };
-        const isMatch =
-          requestSnapshot.type === currentSnapshot.type &&
-          requestSnapshot.primarySelection ===
-            currentSnapshot.primarySelection &&
-          requestSnapshot.secondarySelection ===
-            currentSnapshot.secondarySelection;
+        // 4. 严格验证: 只比较筛选条件，不比较分页信息
+        // 这样可以避免竞态条件导致的误判
+        const currentFilter = currentParamsRef.current;
+        const isFilterMatch =
+          filterSnapshot.type === currentFilter.type &&
+          filterSnapshot.primarySelection === currentFilter.primarySelection &&
+          filterSnapshot.secondarySelection ===
+            currentFilter.secondarySelection &&
+          JSON.stringify(filterSnapshot.multiLevelSelection) ===
+            JSON.stringify(currentFilter.multiLevelSelection);
 
         // 5. 双重锁定去重（避免同一 ID 出现多次）
-        if (isMatch && data.list.length > 0) {
+        if (isFilterMatch && data.list.length > 0) {
           console.log(
             '✅ [fetchMoreData] Appending',
             data.list.length,
@@ -644,7 +639,7 @@ function DoubanPageClient() {
 
           // ✅ 宽松的 hasMore 条件: 只要返回了数据就继续
           setHasMore(data.list.length > 0);
-        } else if (!isMatch) {
+        } else if (!isFilterMatch) {
           console.log('⚠️ [fetchMoreData] Filter changed, discarding data');
         } else {
           console.log('ℹ️ [fetchMoreData] No more data');
