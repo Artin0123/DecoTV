@@ -33,6 +33,47 @@ import VirtualGrid from '@/components/VirtualGrid';
 
 function DoubanPageClient() {
   const searchParams = useSearchParams();
+
+  // 参数映射: 中文 -> 英文 (解决 API 400 错误)
+  const CATEGORY_MAPPING: Record<string, string> = {
+    热门: 'hot',
+    最新: 'new',
+    经典: 'classic',
+    可播放: 'playable',
+    豆瓣高分: 'high_score',
+    冷门佳片: 'hidden_gem',
+    华语: 'chinese',
+    欧美: 'western',
+    韩国: 'korean',
+    日本: 'japanese',
+    全部: 'all',
+    最近热门: 'recent_hot',
+  };
+
+  const TYPE_MAPPING: Record<string, string> = {
+    全部: 'all',
+    剧情: 'drama',
+    喜剧: 'comedy',
+    动作: 'action',
+    爱情: 'romance',
+    科幻: 'scifi',
+    动画: 'animation',
+    悬疑: 'suspense',
+    犯罪: 'crime',
+    恐怖: 'horror',
+    纪录片: 'documentary',
+    战争: 'war',
+    历史: 'history',
+    传记: 'biography',
+    家庭: 'family',
+    奇幻: 'fantasy',
+    武侠: 'martial_arts',
+    古装: 'costume',
+    音乐: 'music',
+    tv: 'tv',
+    show: 'show',
+  };
+
   // FIX: Manual append logic for reliable infinite scrolling
   // 分离豆瓣数据和源数据的状态管理
   const [doubanData, setDoubanData] = useState<DoubanItem[]>([]);
@@ -40,6 +81,11 @@ function DoubanPageClient() {
 
   // 豆瓣模式加载状态
   const [loading, setLoading] = useState(false);
+
+  // 豆瓣模式分页状态 (SmoneTV Pattern)
+  const [currentPage, setCurrentPage] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   // 源模式分页状态
   const [sourceLoadingMore, setSourceLoadingMore] = useState(false);
@@ -424,6 +470,8 @@ function DoubanPageClient() {
 
         if (isSnapshotEqual(requestSnapshot, currentSnapshot)) {
           setDoubanData(data.list);
+          setHasMore(data.list.length >= 50); // 如果返回满页，可能还有更多
+          setCurrentPage(0); // 重置页码
           setLoading(false);
 
           // 【缓存写入】保存到缓存，下次瞬间加载
@@ -450,7 +498,142 @@ function DoubanPageClient() {
     selectedWeekday,
     getRequestParams,
     customCategories,
+    isSnapshotEqual,
   ]);
+
+  // ========================================
+  // SmoneTV Pattern: 无限滚动加载更多数据
+  // ========================================
+  const fetchMoreData = useCallback(async () => {
+    // 防止重复请求
+    if (isLoadingMore || !hasMore) {
+      console.log(
+        '⏸️ [fetchMoreData] Skipped: isLoadingMore=',
+        isLoadingMore,
+        'hasMore=',
+        hasMore,
+      );
+      return;
+    }
+
+    setIsLoadingMore(true);
+
+    try {
+      // 使用映射后的安全参数
+      const safeCategory =
+        CATEGORY_MAPPING[primarySelection] || primarySelection;
+      const safeType = TYPE_MAPPING[secondarySelection] || secondarySelection;
+
+      console.log(
+        '🔄 [fetchMoreData] Loading page',
+        currentPage + 1,
+        'with category:',
+        safeCategory,
+        'type:',
+        safeType,
+      );
+
+      let data: DoubanResult;
+      const pageStart = (currentPage + 1) * 50;
+
+      if (type === 'custom') {
+        const selectedCategory = customCategories.find(
+          (cat) =>
+            cat.type === primarySelection && cat.query === secondarySelection,
+        );
+        if (selectedCategory) {
+          data = await getDoubanList({
+            tag: selectedCategory.query,
+            type: selectedCategory.type,
+            pageLimit: 50,
+            pageStart,
+          });
+        } else {
+          throw new Error('没有找到对应的分类');
+        }
+      } else if (type === 'anime' && primarySelection === '每日放送') {
+        // 每日放送模式不支持分页
+        data = { code: 200, message: 'success', list: [] };
+      } else if (type === 'anime') {
+        data = await getDoubanRecommends({
+          kind: primarySelection === '番剧' ? 'tv' : 'movie',
+          pageLimit: 50,
+          pageStart,
+          category: '动画',
+          format: primarySelection === '番剧' ? '电视剧' : '',
+          region: multiLevelValues.region || '',
+          year: multiLevelValues.year || '',
+          platform: multiLevelValues.platform || '',
+          sort: multiLevelValues.sort || '',
+          label: multiLevelValues.label || '',
+        });
+      } else if (primarySelection === '全部') {
+        data = await getDoubanRecommends({
+          kind: type === 'show' ? 'tv' : (type as 'tv' | 'movie'),
+          pageLimit: 50,
+          pageStart,
+          category: multiLevelValues.type || '',
+          format: type === 'show' ? '综艺' : type === 'tv' ? '电视剧' : '',
+          region: multiLevelValues.region || '',
+          year: multiLevelValues.year || '',
+          platform: multiLevelValues.platform || '',
+          sort: multiLevelValues.sort || '',
+          label: multiLevelValues.label || '',
+        });
+      } else {
+        // 使用映射后的参数
+        data = await getDoubanCategories({
+          kind:
+            type === 'tv' || type === 'show' ? 'tv' : (type as 'tv' | 'movie'),
+          category: type === 'tv' || type === 'show' ? type : safeCategory,
+          type: safeType,
+          pageLimit: 50,
+          pageStart,
+        });
+      }
+
+      if (data.code === 200) {
+        // SmoneTV 模式: 直接追加数据，不做复杂检查
+        console.log(
+          '✅ [fetchMoreData] Got',
+          data.list.length,
+          'items, appending to',
+          doubanData.length,
+        );
+        setDoubanData((prev) => [...prev, ...data.list]);
+        setHasMore(data.list.length >= 50); // 如果返回满页，可能还有更多
+        setCurrentPage((prev) => prev + 1);
+      } else {
+        console.error('❌ [fetchMoreData] API error:', data.message);
+        setHasMore(false);
+      }
+    } catch (err) {
+      console.error('❌ [fetchMoreData] Error:', err);
+      setHasMore(false);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [
+    isLoadingMore,
+    hasMore,
+    currentPage,
+    type,
+    primarySelection,
+    secondarySelection,
+    multiLevelValues,
+    customCategories,
+    doubanData.length,
+    CATEGORY_MAPPING,
+    TYPE_MAPPING,
+  ]);
+
+  // VirtualGrid 触底回调 - 触发加载更多
+  const handleLoadMore = useCallback(() => {
+    if (!hasMore || isLoadingMore || loading) {
+      return;
+    }
+    fetchMoreData();
+  }, [hasMore, isLoadingMore, loading, fetchMoreData]);
 
   // 只在选择器准备好后才加载数据
   useEffect(() => {
@@ -465,6 +648,11 @@ function DoubanPageClient() {
       setLoading(false);
       return;
     }
+
+    // 重置分页状态
+    setCurrentPage(0);
+    setHasMore(true);
+    setIsLoadingMore(false);
 
     // 清除之前的防抖定时器
     if (debounceTimeoutRef.current) {
@@ -1032,10 +1220,13 @@ function DoubanPageClient() {
               <p className='text-sm mt-2'>从上方分类列表中选择</p>
             </div>
           ) : (
-            // 显示豆瓣数据 - 使用 VirtualGrid
+            // 显示豆瓣数据 - 使用 VirtualGrid + 无限滚动
             <VirtualGrid
               items={doubanData}
               priorityCount={12}
+              hasMore={hasMore}
+              isLoadingMore={isLoadingMore}
+              onLoadMore={handleLoadMore}
               renderItem={(item, priority, index) => (
                 <div key={`${item.title}-${index}`} className='w-full h-full'>
                   <VideoCard
@@ -1054,6 +1245,11 @@ function DoubanPageClient() {
                 </div>
               )}
             />
+          )}
+
+          {/* 没有更多数据提示 */}
+          {!hasMore && doubanData.length > 0 && currentSource === 'auto' && (
+            <div className='text-center text-gray-500 py-4'>已加载全部内容</div>
           )}
         </div>
       </div>
